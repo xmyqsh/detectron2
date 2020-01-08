@@ -330,7 +330,8 @@ def build_detection_train_loader(cfg, mapper=None):
             dataset,
             num_workers=cfg.DATALOADER.NUM_WORKERS,
             batch_sampler=batch_sampler,
-            collate_fn=trivial_batch_collator,
+            collate_fn=pin_memory_batch_collator,
+            pin_memory=True,
             worker_init_fn=worker_init_reset_seed,
         )
 
@@ -378,7 +379,8 @@ def build_detection_test_loader(cfg, dataset_name, mapper=None):
         dataset,
         num_workers=cfg.DATALOADER.NUM_WORKERS,
         batch_sampler=batch_sampler,
-        collate_fn=trivial_batch_collator,
+        collate_fn=pin_memory_batch_collator,
+        pin_memory=True,
     )
     return data_loader
 
@@ -388,6 +390,23 @@ def trivial_batch_collator(batch):
     A batch collator that does nothing.
     """
     return batch
+
+def pin_memory_batch_collator(batch):
+    """
+    A naive pin memory batch collator.
+    """
+    class pin_memory:
+        def __init__(self, data):
+            transposed_data = list(zip(*data))
+            self.inp = torch.stack(transposed_data[0], 0)
+            self.tgt = torch.stack(transposed_data[1], 0)
+
+        # custom memory pinning method on custom type
+        def pin_memory(self):
+            self.inp = self.inp.pin_memory()
+            self.tgt = self.tgt.pin_memory()
+            return self
+    return pin_memory(batch)
 
 
 def worker_init_reset_seed(worker_id):
