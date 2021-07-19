@@ -48,6 +48,7 @@ from . import hooks
 from .train_loop import AMPTrainer, SimpleTrainer, TrainerBase
 
 __all__ = [
+    "create_ddp_model",
     "default_argument_parser",
     "default_setup",
     "default_writers",
@@ -58,12 +59,16 @@ __all__ = [
 
 def create_ddp_model(model, *, fp16_compression=False, **kwargs):
     """
+    Create a DistributedDataParallel model if there are >1 processes.
+
     Args:
         model: a torch.nn.Module
         fp16_compression: add fp16 compression hooks to the ddp object.
             See more at https://pytorch.org/docs/stable/ddp_comm_hooks.html#torch.distributed.algorithms.ddp_comm_hooks.default_hooks.fp16_compress_hook
         kwargs: other arguments of :module:`torch.nn.parallel.DistributedDataParallel`.
     """  # noqa
+    if comm.get_world_size() == 1:
+        return model
     if "device_ids" not in kwargs:
         kwargs["device_ids"] = [comm.get_local_rank()]
     ddp = DistributedDataParallel(model, **kwargs)
@@ -143,6 +148,8 @@ def _try_get_key(cfg, *keys, default=None):
     if isinstance(cfg, CfgNode):
         cfg = OmegaConf.create(cfg.dump())
     for k in keys:
+        # OmegaConf.select(default=) is supported only after omegaconf2.1,
+        # but some internal users still rely on 2.0
         parts = k.split(".")
         # https://github.com/omry/omegaconf/issues/674
         for p in parts:
@@ -152,6 +159,20 @@ def _try_get_key(cfg, *keys, default=None):
         else:
             return cfg
     return default
+
+
+def _highlight(code, filename):
+    try:
+        import pygments
+    except ImportError:
+        return code
+
+    from pygments.lexers import Python3Lexer, YamlLexer
+    from pygments.formatters import Terminal256Formatter
+
+    lexer = Python3Lexer() if filename.endswith(".py") else YamlLexer()
+    code = pygments.highlight(code, lexer, Terminal256Formatter(style="monokai"))
+    return code
 
 
 def default_setup(cfg, args):
@@ -181,7 +202,8 @@ def default_setup(cfg, args):
     if hasattr(args, "config_file") and args.config_file != "":
         logger.info(
             "Contents of args.config_file={}:\n{}".format(
-                args.config_file, PathManager.open(args.config_file, "r").read()
+                args.config_file,
+                _highlight(PathManager.open(args.config_file, "r").read(), args.config_file),
             )
         )
 
@@ -190,7 +212,7 @@ def default_setup(cfg, args):
         # config.yaml in output directory
         path = os.path.join(output_dir, "config.yaml")
         if isinstance(cfg, CfgNode):
-            logger.info("Running with full config:\n{}".format(cfg))
+            logger.info("Running with full config:\n{}".format(_highlight(cfg.dump(), ".yaml")))
             with PathManager.open(path, "w") as f:
                 f.write(cfg.dump())
         else:
@@ -242,8 +264,10 @@ class DefaultPredictor:
     3. Apply resizing defined by `cfg.INPUT.{MIN,MAX}_SIZE_TEST`.
     4. Take one input image and produce a single output, instead of a batch.
 
-    If you'd like to do anything more fancy, please refer to its source code
-    as examples to build and use the model manually.
+    This is meant for simple demo purposes, so it does the above steps automatically.
+    This is not meant for benchmarks or running complicated inference logic.
+    If you'd like to do anything more complicated, please refer to its source code as
+    examples to build and use the model manually.
 
     Attributes:
         metadata (Metadata): the metadata of the underlying dataset, obtained from
@@ -356,9 +380,7 @@ class DefaultTrainer(TrainerBase):
         optimizer = self.build_optimizer(cfg, model)
         data_loader = self.build_train_loader(cfg)
 
-        # For training, wrap with DDP. But don't need this for inference.
-        if comm.get_world_size() > 1:
-            model = create_ddp_model(model, broadcast_buffers=False)
+        model = create_ddp_model(model, broadcast_buffers=False)
         self._trainer = (AMPTrainer if cfg.SOLVER.AMP.ENABLED else SimpleTrainer)(
             model, data_loader, optimizer
         )
